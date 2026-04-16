@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Simulador RF Avançado - CI Digital</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #eef2f5; padding: 20px; color: #333; }
+        .header { text-align: center; margin-bottom: 20px; }
+        .container { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
+        .painel { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); min-width: 320px; flex: 1; }
+        h3 { margin-top: 0; color: #004494; border-bottom: 2px solid #004494; padding-bottom: 5px; }
+        
+        .grid-memoria { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+        .reg-box { border: 1px solid #ccc; padding: 5px; text-align: center; border-radius: 4px; background: #f9f9f9; }
+        .reg-box strong { display: block; font-size: 12px; color: #666; }
+        .reg-val { font-size: 18px; font-weight: bold; }
+        
+        .linha-controle { margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 4px; border-left: 4px solid #0056b3; }
+        .linha-controle.porta2 { border-left-color: #6c757d; }
+        .linha-controle.leitura { border-left-color: #28a745; }
+        
+        input[type="number"] { width: 60px; padding: 5px; margin-left: 5px; }
+        button { background-color: #004494; color: white; border: none; padding: 15px; border-radius: 6px; cursor: pointer; font-size: 16px; width: 100%; margin-top: 10px; font-weight: bold; transition: 0.2s;}
+        button:hover { background-color: #002a5c; }
+        
+        .status-box { padding: 10px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #ccc; background: #eee; }
+        .alerta { background-color: #f8d7da; color: #721c24; border-color: #f5c6cb; font-weight: bold; }
+        .bypass { background-color: #fff3cd; color: #856404; border-color: #ffeeba; font-weight: bold; }
+        .seguro { background-color: #d4edda; color: #155724; border-color: #c3e6cb; }
+        
+        .valor-saida { font-size: 28px; font-weight: bold; color: #004494; text-align: center; display: block; margin: 10px 0; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <h2>Simulador Interativo: Register File Avançado (16x32)</h2>
+        <p>Ajuste os parâmetros combinacionais e pulse o clock para gravar os dados.</p>
+    </div>
+
+    <div class="container">
+        <div class="painel" style="max-width: 400px;">
+            <h3>Matriz de Memória (rf)</h3>
+            <div class="grid-memoria" id="grid-memoria">
+                </div>
+            <br>
+            <button onclick="pulsarClock()">Dar Pulso de Clock (Borda de Subida)</button>
+            <button onclick="resetarMemoria()" style="background-color: #dc3545; margin-top: 10px;">Resetar Banco</button>
+        </div>
+
+        <div class="painel">
+            <h3>Sinais de Controle (Entradas)</h3>
+            
+            <div style="margin-bottom: 15px;">
+                <strong>Parâmetros (Parameters):</strong><br>
+                <label><input type="checkbox" id="param_zero_prot" onchange="avaliarCombinacional()"> Proteção do Reg0 (ZERO_REG_PROTECTED)</label><br>
+                <label>Política de Bypass: 
+                    <select id="param_bypass" onchange="avaliarCombinacional()">
+                        <option value="WRITE_FIRST">WRITE_FIRST (Bypass Ligado)</option>
+                        <option value="READ_FIRST">READ_FIRST (Bypass Desligado)</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="linha-controle">
+                <strong>Porta de Escrita 1 (Alta Prioridade)</strong><br>
+                WE1: <input type="checkbox" id="we1" checked onchange="avaliarCombinacional()">
+                Endereço: <input type="number" id="waddr1" value="5" min="0" max="15" oninput="avaliarCombinacional()">
+                Dado: <input type="number" id="wdata1" value="255" oninput="avaliarCombinacional()">
+            </div>
+
+            <div class="linha-controle porta2">
+                <strong>Porta de Escrita 2 (Baixa Prioridade)</strong><br>
+                WE2: <input type="checkbox" id="we2" checked onchange="avaliarCombinacional()">
+                Endereço: <input type="number" id="waddr2" value="5" min="0" max="15" oninput="avaliarCombinacional()">
+                Dado: <input type="number" id="wdata2" value="128" oninput="avaliarCombinacional()">
+            </div>
+
+            <div class="linha-controle leitura">
+                <strong>Portas de Leitura</strong><br>
+                Endereço A (raddr_a): <input type="number" id="raddr_a" value="5" min="0" max="15" oninput="avaliarCombinacional()"><br>
+                Endereço B (raddr_b): <input type="number" id="raddr_b" value="0" min="0" max="15" oninput="avaliarCombinacional()">
+            </div>
+        </div>
+
+        <div class="painel">
+            <h3>Sinais de Saída (Combinacional)</h3>
+            
+            <div id="status_conflito" class="status-box seguro">
+                Conflito de Escrita: 0
+            </div>
+
+            <hr>
+            <h4>Saída A (rdata_a)</h4>
+            <div id="status_hazard_a" class="status-box seguro">Hazard A: 0</div>
+            <div id="msg_bypass_a" class="status-box bypass" style="display:none;"></div>
+            <span class="valor-saida" id="out_rdata_a">0</span>
+
+            <hr>
+            <h4>Saída B (rdata_b)</h4>
+            <div id="status_hazard_b" class="status-box seguro">Hazard B: 0</div>
+            <div id="msg_bypass_b" class="status-box bypass" style="display:none;"></div>
+            <span class="valor-saida" id="out_rdata_b">0</span>
+        </div>
+    </div>
+
+    <script>
+        const DEPTH = 16;
+        let rf = new Array(DEPTH).fill(0); // Cria a memória com 16 posições, todas em 0
+
+        function desenharMemoria() {
+            let html = "";
+            for(let i=0; i<DEPTH; i++) {
+                html += `<div class="reg-box" id="reg-${i}"><strong>Reg[${i}]</strong><span class="reg-val">${rf[i]}</span></div>`;
+            }
+            document.getElementById("grid-memoria").innerHTML = html;
+        }
+
+        function resetarMemoria() {
+            rf.fill(0);
+            desenharMemoria();
+            avaliarCombinacional();
+        }
+
+        function avaliarCombinacional() {
+            // Lendo parâmetros
+            let zero_prot = document.getElementById("param_zero_prot").checked;
+            let bypass_policy = document.getElementById("param_bypass").value;
+
+            // Lendo sinais
+            let we1 = document.getElementById("we1").checked;
+            let waddr1 = parseInt(document.getElementById("waddr1").value) || 0;
+            let wdata1 = parseInt(document.getElementById("wdata1").value) || 0;
+
+            let we2 = document.getElementById("we2").checked;
+            let waddr2 = parseInt(document.getElementById("waddr2").value) || 0;
+            let wdata2 = parseInt(document.getElementById("wdata2").value) || 0;
+
+            let raddr_a = parseInt(document.getElementById("raddr_a").value) || 0;
+            let raddr_b = parseInt(document.getElementById("raddr_b").value) || 0;
+
+            // 1. Lógica de Conflito de Escrita
+            let conflito = (we1 && we2 && (waddr1 === waddr2));
+            let divConflito = document.getElementById("status_conflito");
+            if(conflito) {
+                divConflito.className = "status-box alerta";
+                divConflito.innerText = "Write Conflict: 1 (Porta 1 bloqueando Porta 2)";
+            } else {
+                divConflito.className = "status-box seguro";
+                divConflito.innerText = "Write Conflict: 0";
+            }
+
+            // Lógica Genérica de Bypass (Para reutilizar em A e B)
+            function processarLeitura(raddr, hazardDivId, bypassMsgId, outDataId) {
+                let hazard_1 = (we1 && waddr1 === raddr);
+                let hazard_2 = (we2 && waddr2 === raddr);
+                let temHazard = hazard_1 || hazard_2;
+                
+                let val_saida = rf[raddr]; // READ_FIRST (Padrão)
+                let divHazard = document.getElementById(hazardDivId);
+                let divMsg = document.getElementById(bypassMsgId);
+
+                if(temHazard) {
+                    divHazard.className = "status-box alerta";
+                    divHazard.innerText = "Hazard RAW: 1";
+                    
+                    if(bypass_policy === "WRITE_FIRST") {
+                        // Política de Prioridade na Leitura (Porta 1 vence)
+                        if(hazard_1) val_saida = wdata1;
+                        else if(hazard_2) val_saida = wdata2;
+                        
+                        divMsg.style.display = "block";
+                        divMsg.innerText = "⚡ Bypass: Dado vindo direto da entrada (WRITE_FIRST).";
+                    } else {
+                        divMsg.style.display = "block";
+                        divMsg.innerText = "⏳ Sem Bypass: Mostrando dado antigo (READ_FIRST).";
+                    }
+                } else {
+                    divHazard.className = "status-box seguro";
+                    divHazard.innerText = "Hazard RAW: 0";
+                    divMsg.style.display = "none";
+                }
+
+                document.getElementById(outDataId).innerText = val_saida;
+            }
+
+            // Avalia as duas portas
+            processarLeitura(raddr_a, "status_hazard_a", "msg_bypass_a", "out_rdata_a");
+            processarLeitura(raddr_b, "status_hazard_b", "msg_bypass_b", "out_rdata_b");
+        }
+
+        // Lógica da Borda de Subida (always @ posedge clk)
+        function pulsarClock() {
+            let zero_prot = document.getElementById("param_zero_prot").checked;
+            
+            let we1 = document.getElementById("we1").checked;
+            let waddr1 = parseInt(document.getElementById("waddr1").value) || 0;
+            let wdata1 = parseInt(document.getElementById("wdata1").value) || 0;
+
+            let we2 = document.getElementById("we2").checked;
+            let waddr2 = parseInt(document.getElementById("waddr2").value) || 0;
+            let wdata2 = parseInt(document.getElementById("wdata2").value) || 0;
+
+            let alterados = [];
+
+            // Escrita Porta 1
+            if (we1) {
+                if (!zero_prot || waddr1 !== 0) {
+                    rf[waddr1] = wdata1;
+                    alterados.push(waddr1);
+                }
+            }
+
+            // Escrita Porta 2 (Só escreve se não houver conflito com a 1)
+            if (we2) {
+                if (!(we1 && waddr1 === waddr2)) {
+                    if (!zero_prot || waddr2 !== 0) {
+                        rf[waddr2] = wdata2;
+                        alterados.push(waddr2);
+                    }
+                }
+            }
+
+            desenharMemoria();
+            avaliarCombinacional();
+
+            // Efeito de piscar verde nos registradores gravados
+            alterados.forEach(addr => {
+                let caixa = document.getElementById(`reg-${addr}`);
+                if(caixa) {
+                    caixa.style.backgroundColor = "#28a745";
+                    caixa.style.color = "white";
+                    setTimeout(() => {
+                        caixa.style.backgroundColor = "#f9f9f9";
+                        caixa.style.color = "#333";
+                    }, 400);
+                }
+            });
+        }
+
+        // Inicialização
+        desenharMemoria();
+        avaliarCombinacional();
+    </script>
+</body>
+</html>
