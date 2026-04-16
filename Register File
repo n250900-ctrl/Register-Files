@@ -1,0 +1,211 @@
+// Módulo de Banco de Registradores Avançado (Register File)
+// Desenvolvido para o curso CI Digital - Projeto de Sistemas Digitais
+module register_file_adv #(
+    parameter WIDTH = 32,                 // Define a largura em bits de cada registrador
+    parameter DEPTH = 16,                 // Define o número total de registradores no banco
+    parameter WRITE_PORTS = 2,            // Define se o hardware terá 1 ou 2 portas de escrita
+    parameter ASYNC_READ = 1,             // 1: Leitura combinacional | 0: Leitura síncrona (clock)
+    parameter PIPELINED = 0,              // 1: Adiciona um estágio de registro extra na saída
+    parameter READ_DURING_WRITE = "WRITE_FIRST", // Define se lê o dado novo ou antigo em caso de hazard
+    parameter ZERO_REG_PROTECTED = 0      // 1: Protege o registrador 0 contra qualquer escrita
+)(
+    input wire clk,                       // Sinal de clock do sistema
+    input wire reset,                     // Sinal de reset (Síncrono)
+
+    // Sinais da Porta de Escrita 1 (Prioridade Alta)
+    input wire we1,                       // Habilita a gravação da Porta 1
+    input wire [$clog2(DEPTH)-1:0] waddr1,// Endereço de destino da Porta 1
+    input wire [WIDTH-1:0] wdata1,        // Dado a ser gravado pela Porta 1
+
+    // Sinais da Porta de Escrita 2 (Prioridade Baixa)
+    input wire we2,                       // Habilita a gravação da Porta 2
+    input wire [$clog2(DEPTH)-1:0] waddr2,// Endereço de destino da Porta 2
+    input wire [WIDTH-1:0] wdata2,        // Dado a ser gravado pela Porta 2
+
+    // Sinais das Portas de Leitura
+    input wire [$clog2(DEPTH)-1:0] raddr_a, // Endereço de leitura para a Saída A
+    input wire [$clog2(DEPTH)-1:0] raddr_b, // Endereço de leitura para a Saída B
+    output reg [WIDTH-1:0] rdata_a,         // Barramento de saída de dados A
+    output reg [WIDTH-1:0] rdata_b,         // Barramento de saída de dados B
+
+    // Sinais de Diagnóstico e Controle de Fluxo
+    output wire hazard_a,                 // Sobe se houver tentativa de ler e escrever no mesmo endereço A
+    output wire hazard_b,                 // Sobe se houver tentativa de ler e escrever no mesmo endereço B
+    output wire write_conflict            // Sobe se ambas as portas de escrita tentarem acessar o mesmo endereço
+);
+
+    // Declaração da matriz de memória (O banco de registradores físicos)
+    reg [WIDTH-1:0] rf [0:DEPTH-1];
+    
+    // Variável inteira usada apenas para o loop de inicialização no reset
+    integer i; 
+
+    // =========================================================================
+    // LÓGICA DE STATUS E DIAGNÓSTICO (Sinais Combinacionais)
+    // =========================================================================
+
+    // Conflito de Escrita: Verifica se o sistema tem 2 portas. Se sim, checa se
+    // ambas estão ativas (we1 e we2) apontando para o mesmo endereço (waddr1 == waddr2).
+    // Se a condição for verdadeira, a saída recebe 1, senão recebe 0.
+    assign write_conflict = (WRITE_PORTS == 2) ? (we1 && we2 && (waddr1 == waddr2)) : 1'b0;
+
+    // Hazard A: Acusa perigo se a Porta de Leitura A tentar ler onde a Porta 1 está escrevendo
+    // OU se estiver tentando ler onde a Porta 2 (se existir) está escrevendo.
+    assign hazard_a = (we1 && (waddr1 == raddr_a)) || ((WRITE_PORTS == 2) && we2 && (waddr2 == raddr_a));
+                      
+    // Hazard B: Acusa perigo se a Porta de Leitura B tentar ler onde a Porta 1 está escrevendo
+    // OU se estiver tentando ler onde a Porta 2 (se existir) está escrevendo.
+    assign hazard_b = (we1 && (waddr1 == raddr_b)) || ((WRITE_PORTS == 2) && we2 && (waddr2 == raddr_b));
+
+
+    // =========================================================================
+    // BLOCO DE ESCRITA SÍNCRONA (Acontece apenas na subida do clock)
+    // =========================================================================
+    always @(posedge clk) begin
+        // Verifica se o botão de reset foi acionado
+        if (reset) begin
+            // Laço de repetição: vai do registrador 0 até o último (DEPTH-1)
+            for (i = 0; i < DEPTH; i = i + 1) begin
+                // Preenche o registrador 'i' com todos os bits em ZERO
+                rf[i] <= {WIDTH{1'b0}};
+            end
+        end else begin // Se não estiver em reset, avalia as escritas
+            
+            // --- AVALIAÇÃO DA PORTA 1 ---
+            // Verifica se a Porta de Escrita 1 está habilitada
+            if (we1) begin
+                // Verifica a proteção: Se a proteção do ZERO estiver desligada OU o endereço for diferente de 0
+                if (!ZERO_REG_PROTECTED || waddr1 != 0) begin
+                    // Grava o dado físico na memória no endereço apontado pela porta 1
+                    rf[waddr1] <= wdata1;
+                end
+            end
+            
+            // --- AVALIAÇÃO DA PORTA 2 ---
+            // Verifica se o módulo tem 2 portas de escrita E se a Porta 2 está habilitada
+            if (WRITE_PORTS == 2 && we2) begin
+                // POLÍTICA DE PRIORIDADE FIXA: A Porta 2 só pode gravar se a Porta 1 NÃO 
+                // estiver tentando gravar no exato mesmo lugar.
+                if (!(we1 && (waddr1 == waddr2))) begin
+                    // Verifica a proteção do registrador zero para a porta 2
+                    if (!ZERO_REG_PROTECTED || waddr2 != 0) begin
+                        // Grava o dado físico na memória no endereço apontado pela porta 2
+                        rf[waddr2] <= wdata2;
+                    end
+                end
+            end
+
+        end // Fim do else do reset
+    end // Fim do always da escrita
+
+
+    // =========================================================================
+    // LÓGICA DE BYPASS (Encaminhamento de Dados - Combinacional)
+    // =========================================================================
+    // Variáveis intermediárias para segurar o valor da leitura antes de ir para a saída
+    reg [WIDTH-1:0] bypass_val_a;
+    reg [WIDTH-1:0] bypass_val_b;
+
+    // always @(*) indica que este bloco executa imediatamente se qualquer sinal mudar
+    always @(*) begin
+        
+        // 1. CARREGAMENTO PADRÃO (Comportamento normal / READ_FIRST)
+        // Por padrão, a leitura puxa o valor antigo que está guardado fisicamente no Flip-Flop agora.
+        // Se não houver hazard nenhum, este será o valor definitivo.
+        bypass_val_a = rf[raddr_a];
+        bypass_val_b = rf[raddr_b];
+
+        // 2. VERIFICAÇÃO DA POLÍTICA WRITE_FIRST
+        // O enunciado exige que, caso haja hazard e a política seja WRITE_FIRST, 
+        // a saída deve mostrar o dado NOVO que ainda está entrando, não o antigo.
+        if (READ_DURING_WRITE == "WRITE_FIRST") begin
+            
+            // --- BYPASS PARA A PORTA DE LEITURA A ---
+            // Verifica se a Porta de Escrita 1 está ativa E apontando para o mesmo endereço que estamos lendo
+            if (we1 && (waddr1 == raddr_a)) begin
+                // OCORREU HAZARD! Substituímos o valor antigo pelo dado novo da Porta 1 (wdata1).
+                // Isso cria um "curto-circuito" lógico da entrada para a saída.
+                bypass_val_a = wdata1; 
+            
+            // Se a Porta 1 não causou conflito, verificamos se a Porta 2 causou.
+            // O 'else if' garante que, se ambas escreverem no mesmo endereço que estamos lendo,
+            // o bypass respeitará a Prioridade Fixa (A Porta 1 ganha e a Porta 2 é ignorada).
+            end else if ((WRITE_PORTS == 2) && we2 && (waddr2 == raddr_a)) begin
+                // OCORREU HAZARD COM A PORTA 2! Substituímos pelo dado novo da Porta 2 (wdata2).
+                bypass_val_a = wdata2;
+            end
+
+            // --- BYPASS PARA A PORTA DE LEITURA B ---
+            // Repete exatamente a mesma lógica de "curto-circuito" para a Saída B
+            if (we1 && (waddr1 == raddr_b)) begin
+                // Bypass do dado da Porta 1 para a Saída B
+                bypass_val_b = wdata1;
+            end else if ((WRITE_PORTS == 2) && we2 && (waddr2 == raddr_b)) begin
+                // Bypass do dado da Porta 2 para a Saída B
+                bypass_val_b = wdata2;
+            end
+
+        end // Fim da verificação do WRITE_FIRST
+    end // Fim do always do Bypass
+
+
+    // =========================================================================
+    // SELEÇÃO FINAL DA SAÍDA E PIPELINE (Construtor de Hardware)
+    // =========================================================================
+    // O comando 'generate' constrói caminhos lógicos diferentes dependendo do parâmetro escolhido
+    generate
+        // CASO 1: LEITURA ASSÍNCRONA
+        if (ASYNC_READ == 1) begin
+            // Como é assíncrono, a saída rdata reage instantaneamente aos fios do bypass
+            always @(*) begin
+                // O valor final de rdata recebe diretamente o valor resolvido no bloco acima
+                rdata_a = bypass_val_a;
+                rdata_b = bypass_val_b;
+            end
+
+        // CASO 2: LEITURA SÍNCRONA
+        end else begin
+            
+            // CASO 2A: SÍNCRONA COM PIPELINE
+            if (PIPELINED == 1) begin
+                // Cria dois registradores extras internos para segurar o dado por 1 ciclo a mais
+                reg [WIDTH-1:0] internal_pipe_a;
+                reg [WIDTH-1:0] internal_pipe_b;
+                
+                // Na borda do clock, os dados "andam" uma casa
+                always @(posedge clk) begin
+                    if (reset) begin
+                        // Limpa o pipeline no reset
+                        internal_pipe_a <= {WIDTH{1'b0}};
+                        internal_pipe_b <= {WIDTH{1'b0}};
+                        rdata_a <= {WIDTH{1'b0}};
+                        rdata_b <= {WIDTH{1'b0}};
+                    end else begin
+                        // Estágio 1 do pipeline recebe o dado resolvido no bypass
+                        internal_pipe_a <= bypass_val_a;
+                        internal_pipe_b <= bypass_val_b;
+                        // Estágio 2 (A saída final) recebe o dado que estava no Estágio 1
+                        rdata_a <= internal_pipe_a;
+                        rdata_b <= internal_pipe_b;
+                    end
+                end
+
+            // CASO 2B: SÍNCRONA SEM PIPELINE
+            end else begin
+                // O dado é registrado na saída com apenas 1 ciclo de latência
+                always @(posedge clk) begin
+                    if (reset) begin
+                        // Limpa as saídas no reset
+                        rdata_a <= {WIDTH{1'b0}};
+                        rdata_b <= {WIDTH{1'b0}};
+                    end else begin
+                        // A saída final recebe o dado resolvido no bypass na batida do clock
+                        rdata_a <= bypass_val_a;
+                        rdata_b <= bypass_val_b;
+                    end
+                end
+            end // Fim do if PIPELINED
+        end // Fim do if ASYNC_READ
+    endgenerate
+
+endmodule
